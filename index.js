@@ -6,8 +6,54 @@ const path = require('path')
 const fs = require('fs')
 const URL = require('url').URL
 const { https } = require('follow-redirects')
-const AdmZip = require('adm-zip')
+const zlib = require('zlib')
 const HttpsProxyAgent = require('https-proxy-agent')
+
+function extractZip(buffer) {
+    const EOCD_SIG = 0x06054b50
+    const CD_SIG   = 0x02014b50
+    const LFH_SIG  = 0x04034b50
+
+    let eocdOffset = -1
+    for (let i = buffer.length - 22; i >= Math.max(0, buffer.length - 65557); i--) {
+        if (buffer.readUInt32LE(i) === EOCD_SIG) { eocdOffset = i; break }
+    }
+    if (eocdOffset === -1) throw new Error('Invalid ZIP: EOCD record not found')
+
+    const cdOffset = buffer.readUInt32LE(eocdOffset + 16)
+    const cdCount  = buffer.readUInt16LE(eocdOffset + 10)
+
+    const entries = []
+    let pos = cdOffset
+    for (let i = 0; i < cdCount; i++) {
+        if (buffer.readUInt32LE(pos) !== CD_SIG) throw new Error('Invalid ZIP: central directory signature mismatch')
+        const compression      = buffer.readUInt16LE(pos + 10)
+        const compressedSize   = buffer.readUInt32LE(pos + 20)
+        const nameLen          = buffer.readUInt16LE(pos + 28)
+        const extraLen         = buffer.readUInt16LE(pos + 30)
+        const commentLen       = buffer.readUInt16LE(pos + 32)
+        const localHeaderOffset = buffer.readUInt32LE(pos + 42)
+        const name             = buffer.toString('utf8', pos + 46, pos + 46 + nameLen)
+        entries.push({ name, compression, compressedSize, localHeaderOffset })
+        pos += 46 + nameLen + extraLen + commentLen
+    }
+
+    return entries.map(entry => {
+        const lpos = entry.localHeaderOffset
+        if (buffer.readUInt32LE(lpos) !== LFH_SIG) throw new Error('Invalid ZIP: local file header signature mismatch')
+        const lNameLen  = buffer.readUInt16LE(lpos + 26)
+        const lExtraLen = buffer.readUInt16LE(lpos + 28)
+        const dataStart = lpos + 30 + lNameLen + lExtraLen
+        const compressed = buffer.slice(dataStart, dataStart + entry.compressedSize)
+
+        let data
+        if (entry.compression === 0)      data = compressed
+        else if (entry.compression === 8) data = zlib.inflateRawSync(compressed)
+        else throw new Error(`Unsupported ZIP compression method: ${entry.compression}`)
+
+        return { name: entry.name, data }
+    })
+}
 
 function selectPlatform(platform, version) {
     if (platform) {
@@ -109,11 +155,10 @@ try {
                         return pos + chunk.length
                     }, 0)
 
-                    const zip = new AdmZip(buffer)
-                    const entries = zip.getEntries()
+                    const entries = extractZip(buffer)
                     if (entries.length === 0) throw new Error('ZIP archive is empty')
                     const entry = entries[0]
-                    const ninjaName = entry.entryName
+                    const ninjaName = entry.name
 
                     if (ninjaName.includes('..') || path.isAbsolute(ninjaName) || ninjaName.includes('/') || ninjaName.includes('\\')) {
                         throw new Error(`Unsafe entry name in ZIP: '${ninjaName}'`)
@@ -128,7 +173,7 @@ try {
                         throw new Error(`ZIP entry would extract outside destination: '${ninjaName}'`)
                     }
 
-                    zip.extractEntryTo(ninjaName, fullDestDir, /*maintainEntryPath*/false, /*overwrite*/true)
+                    fs.writeFileSync(fullFileDir, entry.data)
                     if (!fs.existsSync(fullFileDir)) throw new Error(`failed to extract to '${fullFileDir}'`)
 
                     fs.chmodSync(fullFileDir, '755')
