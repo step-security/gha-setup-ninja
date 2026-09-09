@@ -1,0 +1,29 @@
+name: setup-ninja
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    name: test
+    runs-on: ${{ matrix.image }}
+
+    strategy:
+      matrix:
+        image: ${{ fromJSON(github.actor == 'dependabot[bot]' && '["ubuntu-latest"]' || '["windows-latest","ubuntu-latest","macos-latest"]') }}
+        version: ${{ fromJSON(github.actor == 'dependabot[bot]' && '["1.12.1"]' || '["1.9.0","1.10.2","1.11.1","1.12.1"]') }}
+        include: ${{ fromJSON(github.actor != 'dependabot[bot]' && '[{"image":"ubuntu-24.04-arm","version":"1.12.1"}]' || '[]') }}
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: 'package.json'
+      - uses: ./
+        with:
+          version: '${{ matrix.version }}'
+      - shell: bash
+        run: '[ "$(ninja --version)" == "${{ matrix.version }}" ]'
